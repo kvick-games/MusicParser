@@ -3,6 +3,11 @@ import random
 import os
 import subprocess
 from collections import defaultdict
+import torch
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import torchvision.transforms as T
+import json
 
 # MuseScore path (global variable, adjust if needed)
 musescore_path = r"C:\Program Files\MuseScore 4\bin\MuseScore4.exe"
@@ -19,7 +24,6 @@ def create_score(output_dir, base_name="score", num_measures=4):
     Returns:
         tuple: Paths to the MusicXML, MIDI, and image files.
     """
-    
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
@@ -126,7 +130,12 @@ def midi_to_tokens(midi_path):
     return token_sequence
 
 def clear_output_dir(output_dir):
-    # Clear out existing files in the output directory
+    """
+    Clear out existing files in the output directory with specified extensions.
+    
+    Args:
+        output_dir (str): Directory to clear.
+    """
     if os.path.exists(output_dir):
         for fname in os.listdir(output_dir):
             if fname.endswith(('.xml', '.mid', '.png')):
@@ -170,66 +179,159 @@ def build_vocabulary(token_sequences):
 
     return token_to_id, id_to_token
 
-#==================================================================================================
+def preprocess_image(image_path, target_size=(128, 1024)):
+    """
+    Preprocess a tablature image into a tensor.
+    
+    Args:
+        image_path (str): Path to the PNG image.
+        target_size (tuple): Target size for the image (height, width).
+    
+    Returns:
+        torch.Tensor: Preprocessed image tensor, normalized to [-1, 1].
+    """
+    transform = T.Compose([
+        T.Resize(target_size),  # Resize to fixed height and width
+        T.ToTensor(),  # Convert to tensor [0, 1]
+        T.Normalize((0.5,), (0.5,))  # Normalize to [-1, 1]
+    ])
+    img = Image.open(image_path).convert('L')  # Grayscale
+    img_tensor = transform(img)
+    return img_tensor
 
-#---------
-#PARAMS
-# Example loop to generate multiple training pairs
+def tokens_to_ids(token_sequence, token_to_id):
+    """
+    Convert a token sequence to integer IDs using the vocabulary.
+    
+    Args:
+        token_sequence (list): List of token strings.
+        token_to_id (dict): Mapping of tokens to integer IDs.
+    
+    Returns:
+        list: List of integer IDs.
+    """
+    return [token_to_id[token] for token in token_sequence]
+
+class TabMidiDataset(Dataset):
+    """
+    Custom PyTorch Dataset for tablature images and MIDI token sequences.
+    """
+    def __init__(self, image_paths, token_sequences, token_to_id):
+        """
+        Initialize the dataset.
+        
+        Args:
+            image_paths (list): List of paths to tablature images.
+            token_sequences (list): List of token sequences (strings).
+            token_to_id (dict): Mapping of tokens to integer IDs.
+        """
+        self.image_paths = image_paths
+        self.token_sequences = token_sequences
+        self.token_to_id = token_to_id
+
+    def __len__(self):
+        """Return the total number of samples."""
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        """
+        Get a sample (image tensor, integer token sequence) at the given index.
+        
+        Args:
+            idx (int): Index of the sample.
+        
+        Returns:
+            tuple: (image_tensor, token_ids), where token_ids are integers.
+        """
+        # Preprocess image
+        image_path = self.image_paths[idx]
+        image_tensor = preprocess_image(image_path)
+
+        # Convert tokens to IDs
+        token_sequence = self.token_sequences[idx]
+        token_ids = tokens_to_ids(token_sequence, self.token_to_id)
+
+        return image_tensor, torch.tensor(token_ids, dtype=torch.long)
+
+# ---------
+# PARAMS
 training_dir = r"D:\MusicParser\TrainingData"
 num_samples = 5  # Generate 5 samples for testing
-#---------
 
-all_token_sequences = []  # Collect all token sequences for vocabulary
+generateTrainingData = False
+trainingRun = True
+# ---------
 
-clear_output_dir(training_dir)  # Clear existing training data
+if generateTrainingData:
+    # Clear existing training data
+    clear_output_dir(training_dir)
 
-for i in range(num_samples):
-    print(f"\nGenerating sample {i + 1}...")
-    # Generate score with unique file names
-    _, midi_path, image_path = create_score(
-        output_dir=training_dir,
-        base_name=f"sample_{i}",
-        num_measures=4
-    )
-    # Convert MIDI to tokens
-    tokens = midi_to_tokens(midi_path)
-    print(f"Token sequence for sample {i}: {tokens}")
-    all_token_sequences.append(tokens)
-    # Here you could save image_path and tokens for later use in training
+    # Generate training data and save token sequences and image paths
+    all_token_sequences = []
+    image_paths = []
 
-# Build and print the vocabulary
-token_to_id, id_to_token = build_vocabulary(all_token_sequences)
-print("\nToken to ID mapping:")
-for token, idx in token_to_id.items():
-    print(f"{token}: {idx}")
-print("\nID to Token mapping:")
-for idx, token in id_to_token.items():
-    print(f"{idx}: {token}")
+    for i in range(num_samples):
+        print(f"\nGenerating sample {i + 1}...")
+        # Generate score with unique file names
+        _, midi_path, image_path = create_score(
+            output_dir=training_dir,
+            base_name=f"sample_{i}",
+            num_measures=4
+        )
+        image_paths.append(image_path)
+        # Convert MIDI to tokens
+        tokens = midi_to_tokens(midi_path)
+        print(f"Token sequence for sample {i}: {tokens}")
+        all_token_sequences.append(tokens)
 
-"""
-#Example of using the vocabulary
-#----------------------------------------------
-# Convert a token sequence to IDs
-token_sequence = ['START', 'NOTE_ON_64', 'TIME_SHIFT_96', 'END']
-id_sequence = [token_to_id[token] for token in token_sequence]
-print(id_sequence)  # e.g., [0, 2, 4, 1]
+    # Build and save the vocabulary
+    token_to_id, id_to_token = build_vocabulary(all_token_sequences)
+    print("\nToken to ID mapping:")
+    for token, idx in token_to_id.items():
+        print(f"{token}: {idx}")
+    print("\nID to Token mapping:")
+    for idx, token in id_to_token.items():
+        print(f"{idx}: {token}")
 
-#----------------------------------------------
-# Convert an ID sequence back to tokens
-decoded_tokens = [id_to_token[idx] for idx in id_sequence]
-print(decoded_tokens)  # e.g., ['START', 'NOTE_ON_64', 'TIME_SHIFT_96', 'END']
+    # Save token sequences and image paths to JSON files
+    data_path = os.path.join(training_dir, "training_data.json")
+    with open(data_path, 'w') as f:
+        json.dump({"image_paths": image_paths, "token_sequences": all_token_sequences}, f)
+    print(f"Training data saved at: {data_path}")
 
-#----------------------------------------------
-# Load the vocabulary from a file
-with open(vocab_path, 'r') as f:
-    vocab = json.load(f)
-token_to_id = vocab["token_to_id"]
-id_to_token = vocab["id_to_token"]
-"""
+    # Save the vocabulary to a file for later use
+    vocab_path = os.path.join(training_dir, "vocabulary.json")
+    with open(vocab_path, 'w') as f:
+        json.dump({"token_to_id": token_to_id, "id_to_token": id_to_token}, f)
+    print(f"Vocabulary saved at: {vocab_path}")
 
-# Save the vocabulary to a file for later use (optional)
-import json
-vocab_path = os.path.join(training_dir, "vocabulary.json")
-with open(vocab_path, 'w') as f:
-    json.dump({"token_to_id": token_to_id, "id_to_token": id_to_token}, f)
-print(f"Vocabulary saved at: {vocab_path}")
+if trainingRun:
+    # Load training data and vocabulary for training
+    data_path = os.path.join(training_dir, "training_data.json")
+    vocab_path = os.path.join(training_dir, "vocabulary.json")
+
+    # Load vocabulary
+    with open(vocab_path, 'r') as f:
+        vocab = json.load(f)
+    token_to_id = vocab["token_to_id"]
+    id_to_token = vocab["id_to_token"]
+
+    # Load training data (image paths and token sequences)
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+    image_paths = data["image_paths"]
+    token_sequences = data["token_sequences"]
+
+    # Create dataset
+    dataset = TabMidiDataset(image_paths, token_sequences, token_to_id)
+
+    # Example: Create a DataLoader for batching
+    batch_size = 2
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Example: Iterate over the dataset to verify
+    for images, token_ids in dataloader:
+        print(f"Batch of images shape: {images.shape}")  # e.g., [batch_size, 1, 128, 1024]
+        print(f"Batch of token IDs shape: {token_ids.shape}")  # e.g., [batch_size, seq_len]
+        print(f"Sample token IDs: {token_ids[0].tolist()}")  # First sample in batch
+        break  # Just show one batch for now
